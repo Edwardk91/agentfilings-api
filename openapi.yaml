@@ -1,0 +1,128 @@
+openapi: 3.1.0
+info:
+  title: AgentFilings API
+  version: 0.0.0
+  description: >-
+    Structured US SEC/EDGAR filing and earnings data as clean JSON for AI agents.
+    Free /health and /probe; paid routes require x402 payment or a Stripe-provisioned
+    API key. This spec is generated to track the surface; paid routes are stubbed
+    until Stage 0 payment wiring lands.
+servers:
+  - url: http://localhost:8080
+    description: local dev
+paths:
+  /health:
+    get:
+      operationId: health
+      summary: Liveness probe (free).
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status: { type: string, example: ok }
+                  service: { type: string, example: agentfilings }
+                  version: { type: string }
+                  time: { type: string, format: date-time }
+  /probe:
+    get:
+      operationId: probe
+      summary: Coverage, freshness, and per-endpoint pricing (free).
+      parameters:
+        - in: query
+          name: ticker
+          required: false
+          schema: { type: string }
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Envelope"
+  /filings/latest:
+    get:
+      operationId: filings_latest
+      summary: Latest filings for a ticker ($0.01 — x402 or API key).
+      parameters:
+        - { in: query, name: ticker, required: true, schema: { type: string } }
+        - in: query
+          name: form
+          required: false
+          schema: { type: string }
+          description: "Filter by form type, e.g. 10-K, 10-Q, 8-K, 4."
+        - in: query
+          name: limit
+          required: false
+          schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+      responses:
+        "200":
+          description: OK
+          content: { application/json: { schema: { $ref: "#/components/schemas/Envelope" } } }
+        "400":
+          description: Bad request
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "402":
+          description: >-
+            Payment required. Payment requirements are in the PAYMENT-REQUIRED
+            response header per the x402 v2 spec (not the body).
+        "404":
+          description: No coverage for ticker
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+  /earnings/summary:
+    get:
+      operationId: earnings_summary
+      summary: XBRL-derived earnings summary ($0.02 — x402 or API key).
+      parameters:
+        - { in: query, name: ticker, required: true, schema: { type: string } }
+        - in: query
+          name: period
+          required: false
+          schema: { type: string }
+          description: "annual | quarterly | interim | a fiscal year (2025 / FY2025) | a frame (CY2026Q1)."
+      responses:
+        "200":
+          description: OK
+          content: { application/json: { schema: { $ref: "#/components/schemas/Envelope" } } }
+        "400":
+          description: Bad request
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+        "402":
+          description: Payment required (x402 v2; see PAYMENT-REQUIRED header).
+        "404":
+          description: No coverage for ticker
+          content: { application/json: { schema: { $ref: "#/components/schemas/Error" } } }
+components:
+  schemas:
+    Envelope:
+      type: object
+      required: [data, meta]
+      properties:
+        data: {}
+        meta:
+          type: object
+          required: [retrieved_at, cache]
+          properties:
+            source_accession: { type: string }
+            source_api: { type: string }
+            filed_at: { type: [string, "null"], format: date-time }
+            retrieved_at: { type: string, format: date-time }
+            cache: { type: string, enum: [hit, miss] }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message, hint]
+          properties:
+            code: { type: string }
+            message: { type: string }
+            hint: { type: string }
+            details: {}
+# TODO: generate these paths from packages/shared/pricing.ts rather than hand-
+# maintaining them, and add /insiders, /institutional, /filings/extract, /search
+# as their stages land.

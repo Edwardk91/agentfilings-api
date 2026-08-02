@@ -1,0 +1,37 @@
+# AgentFilings
+
+> Pay-per-call HTTP API + MCP server serving pre-ingested, structured US SEC/EDGAR
+> filing and earnings data as clean JSON to autonomous AI agents. Public-domain
+> EDGAR data only. Payment via x402 (USDC on Base) or a Stripe-provisioned API key.
+
+Every response is deterministic and strongly typed: `{ data, meta }`, where
+`meta` carries the source (accession or SEC API), `filed_at`, `retrieved_at`,
+and cache status. Errors carry a machine-readable `code`, an agent-readable
+`message`, and a `hint`. Check `/probe` (free) for coverage, freshness, and
+per-call pricing before paying.
+
+## Endpoints (Stage 0 live; later stages marked)
+
+- GET  /health                         — free. Liveness.
+- GET  /probe?ticker=                   — free. Coverage, freshness, pricing.
+- GET  /filings/latest?ticker=&form=&limit=  — $0.01. Latest filings.
+- GET  /earnings/summary?ticker=&period=     — $0.02. XBRL-derived earnings summary.
+- GET  /insiders?ticker=&since=         — $0.01 (Stage 1). Form 4 transactions.
+- GET  /institutional?ticker=&quarter=  — $0.02 (Stage 1). 13F holdings.
+- POST /filings/extract                 — $0.03–0.05 (Stage 1). Section extraction.
+- POST /search                          — $0.03 (Stage 2). Semantic search.
+
+## Payment
+
+- x402: HTTP 402 per the x402 spec; pay USDC on Base; server verifies settlement
+  before serving. Fixed price per route (no dynamic pricing).
+- Fiat: buy a prepaid credit pack (Stripe), get an API key, send
+  `Authorization: Bearer <key>`; credits decrement at the same per-call prices.
+
+## MCP
+
+Streamable HTTP at /mcp. Tools mirror the endpoints 1:1; each tool description
+states its price. Free tool: probe_coverage.
+
+Status: DRAFT — pricing and coverage are authoritative; freshness/coverage
+numbers populate once the corpus lands. See openapi.yaml for the machine spec.

@@ -1,0 +1,38 @@
+# Node
+node_modules/
+dist/
+*.tsbuildinfo
+.pnpm-store/
+
+# Env / secrets (Eddie provisions; never commit)
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.ruff_cache/
+.pytest_cache/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Claude Code local state
+.claude/
+
+# Logs / scratch
+*.log
+tmp/
+
+# Generated corpus (live ingestion output; regenerable via `sync`). Test fixtures
+# under apps/*/tests|test/fixtures ARE committed.
+/data/
+
+# MCP registry namespace signing key (never commit)
+.tools/
+

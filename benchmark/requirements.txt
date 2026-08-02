@@ -1,0 +1,7 @@
+# Core benchmark: fetches SEC data and computes ground truth. Nothing else needed.
+httpx>=0.27
+
+# Optional, for `--compare edgartools`. Left unpinned deliberately: the point is to
+# measure whatever the current release does, and a pin here would hide a fix.
+# edgartools
+# pandas
