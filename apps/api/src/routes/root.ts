@@ -108,7 +108,7 @@ inheriting a later filing's label, and ticker→CIK resolution rejects post-reor
 Those three are wrong in the widely used open-source alternatives.</p>
 <p>Machine-readable: <a href="${base}/openapi.json">openapi.json</a> ·
 <a href="${base}/llms.txt">llms.txt</a> · MCP at <code>${base}/mcp</code></p>
-<p>Data source: <a href="https://www.sec.gov/edgar">SEC EDGAR</a> (public domain), refreshed twice daily.</p>
+<p>Data source: <a href="https://www.sec.gov/edgar">SEC EDGAR</a> (public domain), refreshed on a daily rotation — company metadata every ~3 days, Form 4 every ~19 days.</p>
 </body></html>`;
 }
 

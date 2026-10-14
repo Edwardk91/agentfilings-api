@@ -1,5 +1,6 @@
 import type { Company, EarningsPeriod, Filing, InsiderTransaction } from "@agentfilings/shared";
-import postgres, { type Sql } from "postgres";
+import { type Sql } from "postgres";
+import { createSql, withRetry } from "../lib/db";
 import type {
   Coverage,
   CorpusRepo,
@@ -27,17 +28,17 @@ export class PostgresCorpusRepo implements CorpusRepo {
   private readonly sql: Sql;
 
   constructor(connectionString: string) {
-    // Supabase's transaction pooler (pgbouncer, port 6543) does not support prepared
-    // statements — disable them.
-    this.sql = postgres(connectionString, { prepare: false });
+    // Pooler quirks (no prepared statements, idle connections closed server-side)
+    // are handled centrally — see lib/db.ts.
+    this.sql = createSql(connectionString);
   }
 
   private async resolveCompany(
     ticker: string,
   ): Promise<{ cik: string; company: Company; retrievedAt: string } | null> {
-    const rows = await this.sql<CompanyRow[]>`
+    const rows = await withRetry(() => this.sql<CompanyRow[]>`
       select cik, ticker, name, sic, sic_description, exchanges, updated_at::text
-      from companies where ticker = ${ticker} limit 1`;
+      from companies where ticker = ${ticker} limit 1`);
     const row = rows[0];
     if (!row) return null;
     const company: Company = {
@@ -59,12 +60,12 @@ export class PostgresCorpusRepo implements CorpusRepo {
     if (!resolved) return null;
     const limit = opts.limit ?? 20;
     const formFilter = opts.form ? this.sql`and form = ${opts.form}` : this.sql``;
-    const filings = await this.sql<Filing[]>`
+    const filings = await withRetry(() => this.sql<Filing[]>`
       select accession_no, form, filed_at::text, period::text, primary_doc, primary_doc_url
       from filings
       where cik = ${resolved.cik} ${formFilter}
       order by filed_at desc, accession_no desc
-      limit ${limit}`;
+      limit ${limit}`);
     return { company: resolved.company, filings, retrievedAt: resolved.retrievedAt };
   }
 
@@ -85,13 +86,13 @@ export class PostgresCorpusRepo implements CorpusRepo {
       filter = this.sql`and lower(frame) = ${period}`;
     }
 
-    const periods = await this.sql<EarningsPeriod[]>`
+    const periods = await withRetry(() => this.sql<EarningsPeriod[]>`
       select period_start::text, period_end::text, duration, fiscal_year, fiscal_period, frame,
              revenue::float8, net_income::float8, eps_basic::float8, eps_diluted::float8,
              form, filed_at::text, source_accession
       from earnings_periods
       where cik = ${resolved.cik} ${filter}
-      order by period_end desc, period_start desc`;
+      order by period_end desc, period_start desc`);
     return { company: resolved.company, periods, retrievedAt: resolved.retrievedAt };
   }
 
@@ -102,18 +103,18 @@ export class PostgresCorpusRepo implements CorpusRepo {
     const resolved = await this.resolveCompany(ticker);
     if (!resolved) return null;
     const sinceFilter = opts.since ? this.sql`and transaction_date >= ${opts.since}` : this.sql``;
-    const transactions = await this.sql<InsiderTransaction[]>`
+    const transactions = await withRetry(() => this.sql<InsiderTransaction[]>`
       select filed_at::text, accession_no, owner_name, owner_cik, relationship, officer_title,
              transaction_date::text, code, security, shares::float8, price::float8,
              acquired_disposed, shares_owned_after::float8, derivative
       from insider_transactions
       where cik = ${resolved.cik} ${sinceFilter}
-      order by transaction_date desc nulls last`;
+      order by transaction_date desc nulls last`);
     return { company: resolved.company, transactions, retrievedAt: resolved.retrievedAt };
   }
 
   async getTickerCoverage(ticker: string): Promise<TickerCoverage> {
-    const rows = await this.sql<
+    const rows = await withRetry(() => this.sql<
       {
         cik: string;
         name: string;
@@ -129,7 +130,7 @@ export class PostgresCorpusRepo implements CorpusRepo {
              (select count(*)::int from insider_transactions i where i.cik = c.cik) as insiders
       from companies c
       where c.ticker = ${ticker}
-      limit 1`;
+      limit 1`);
     const row = rows[0];
     if (!row) {
       return {
@@ -151,8 +152,8 @@ export class PostgresCorpusRepo implements CorpusRepo {
   }
 
   async getCoverage(): Promise<Coverage> {
-    const rows = await this.sql<{ covered: number; last: string | null }[]>`
-      select count(*)::int as covered, max(updated_at)::text as last from companies`;
+    const rows = await withRetry(() => this.sql<{ covered: number; last: string | null }[]>`
+      select count(*)::int as covered, max(updated_at)::text as last from companies`);
     const row = rows[0];
     return { covered: row?.covered ?? 0, lastIngestAt: row?.last ?? null };
   }

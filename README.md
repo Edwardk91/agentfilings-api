@@ -3,14 +3,18 @@
 Structured US SEC/EDGAR filing data for AI agents — filings index, XBRL-derived
 earnings, and Form 4 insider transactions as clean JSON, over both HTTP and MCP.
 
-Two payment rails: **x402** (USDC on Base mainnet, no account required) for
-autonomous agents, and a **flat Stripe subscription** for anyone who'd rather use a
-card and an API key.
+Paid per call with **x402** (USDC on Base mainnet, no account required). A flat
+**Stripe subscription** rail — API-key issuance, subscription gate, checkout and
+webhook — is implemented in `apps/api/src/billing/` but not switched on in the live
+deployment.
 
 Live at [api.agentfilings.com](https://api.agentfilings.com) ·
 [OpenAPI](https://api.agentfilings.com/openapi.json) ·
 [llms.txt](https://api.agentfilings.com/llms.txt) ·
-MCP at `https://api.agentfilings.com/mcp`
+MCP at `https://api.agentfilings.com/mcp`, listed in the official MCP registry as
+`com.agentfilings/mcp`, with an [MCP Server Card](https://api.agentfilings.com/mcp/server-card),
+an [AI Catalog](https://api.agentfilings.com/.well-known/ai-catalog.json) and an
+[x402 manifest](https://api.agentfilings.com/.well-known/x402) for discovery.
 
 ```bash
 # Free. Tells you what data exists before you spend anything.

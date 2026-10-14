@@ -54,7 +54,8 @@ retry. Standard x402 clients handle this automatically.
 
 ## Data notes
 
-- Source: SEC EDGAR, public domain. Refreshed twice daily.
+- Source: SEC EDGAR, public domain. Refreshed on a daily rotation: a given company's
+  metadata every ~3 days, its Form 4 data every ~19 days.
 - Earnings are derived from XBRL company facts, not from parsing documents.
   Restated figures resolve to the latest value, while each period keeps the fiscal
   year and quarter from its ORIGINAL filing, so prior-year comparatives embedded in
@@ -65,7 +66,12 @@ retry. Standard x402 clients handle this automatically.
   any specific company. Tickers resolving to a post-reorganization shell with no XBRL
   history are deliberately excluded rather than reported as empty.
 `;
-    return c.text(body);
+    // Pass a status explicitly. Under @hono/node-server 1.19.14 a bare c.text(body)
+    // answers HEAD with a 500 — reproduced in isolation, and seen in production from a
+    // crawler checking this file. Any form carrying a status is unaffected, which is why
+    // robots.txt never showed it. Hono's own test harness bypasses the Node adapter, so
+    // only the regression test that serves over a real socket catches this.
+    return c.text(body, 200, { "cache-control": "public, max-age=3600" });
   });
 
   return router;

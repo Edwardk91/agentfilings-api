@@ -3,6 +3,7 @@ import { endpointById, ENDPOINTS, PRICE_BAND_USD } from "@agentfilings/shared";
 import { z } from "zod";
 import type { CorpusRepo, TickerCoverage } from "../repo/corpus-repo";
 import { queryEarningsSummary, queryInsiders, queryLatestFilings } from "../services/queries";
+import { SERVER_IDENTITY } from "./identity";
 import type { McpPaidWrapper } from "./payments";
 
 // MCP server (handoff §6). Tools mirror the paid endpoints 1:1 and state their price
@@ -11,8 +12,6 @@ import type { McpPaidWrapper } from "./payments";
 //
 // When x402 is enabled, paid tools are wrapped with @x402/mcp (shared resource server
 // + replay guard); unwrapped in dev.
-
-const VERSION = "0.0.0";
 
 // Per-tool data availability. A company can be covered for filings and empty for
 // earnings (IFRS filers, pre-revenue companies), so the probe must say which tools
@@ -97,12 +96,16 @@ function gate<A extends Record<string, unknown>>(
 }
 
 export function createMcpServer(repo: CorpusRepo, wrapPaid?: McpPaidWrapper): McpServer {
-  const server = new McpServer({ name: "agentfilings", version: VERSION });
+  const server = new McpServer({ name: SERVER_IDENTITY.shortName, version: SERVER_IDENTITY.version });
 
   server.registerTool(
     "probe_coverage",
     {
       title: "Check coverage and pricing (free)",
+      // Every tool here only reads the corpus. Declaring it lets a client
+      // auto-approve the call instead of prompting, and openWorldHint false
+      // says the answer comes from our own bounded dataset, not the live web.
+      annotations: { readOnlyHint: true, openWorldHint: false },
       description:
         "FREE — no payment required. Call this FIRST to check whether a ticker is " +
         "covered and what it will cost before spending anything. Returns whether the " +
@@ -148,7 +151,7 @@ export function createMcpServer(repo: CorpusRepo, wrapPaid?: McpPaidWrapper): Mc
           companies_covered: coverage.covered,
           source: "SEC EDGAR (public domain)",
         },
-        freshness: { last_ingest_at: coverage.lastIngestAt, cadence: "twice daily" },
+        freshness: { last_ingest_at: coverage.lastIngestAt, cadence: "daily rotation: metadata ~3 days, Form 4 ~19 days per company" },
         pricing: ENDPOINTS.filter((e) => e.mcpTool && e.available).map((e) => ({
           tool: e.mcpTool,
           price_usd: e.priceUsd,
@@ -164,6 +167,10 @@ export function createMcpServer(repo: CorpusRepo, wrapPaid?: McpPaidWrapper): Mc
     "get_latest_filings",
     {
       title: "Get latest filings",
+      // Every tool here only reads the corpus. Declaring it lets a client
+      // auto-approve the call instead of prompting, and openWorldHint false
+      // says the answer comes from our own bounded dataset, not the live web.
+      annotations: { readOnlyHint: true, openWorldHint: false },
       description:
         "Latest SEC filings for a US public company, as structured JSON: form type, " +
         "filing date, period, accession number, and a direct link to the document. " +
@@ -187,6 +194,10 @@ export function createMcpServer(repo: CorpusRepo, wrapPaid?: McpPaidWrapper): Mc
     "get_earnings_summary",
     {
       title: "Get earnings summary",
+      // Every tool here only reads the corpus. Declaring it lets a client
+      // auto-approve the call instead of prompting, and openWorldHint false
+      // says the answer comes from our own bounded dataset, not the live web.
+      annotations: { readOnlyHint: true, openWorldHint: false },
       description:
         "Revenue, net income, and basic/diluted EPS by fiscal period for a US public " +
         "company, normalized from SEC XBRL data. Handles the parts that are easy to get " +
@@ -214,6 +225,10 @@ export function createMcpServer(repo: CorpusRepo, wrapPaid?: McpPaidWrapper): Mc
     "get_insider_transactions",
     {
       title: "Get insider transactions",
+      // Every tool here only reads the corpus. Declaring it lets a client
+      // auto-approve the call instead of prompting, and openWorldHint false
+      // says the answer comes from our own bounded dataset, not the live web.
+      annotations: { readOnlyHint: true, openWorldHint: false },
       description:
         "Form 4 insider transactions for a US public company: who traded, their role " +
         "(director/officer/10% owner), transaction code, share count, price, and shares " +

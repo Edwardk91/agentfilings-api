@@ -90,7 +90,7 @@ export function probe(repo: CorpusRepo) {
           },
           freshness: {
             last_ingest_at: coverage.lastIngestAt,
-            cadence: "twice daily",
+            cadence: "daily rotation: metadata ~3 days, Form 4 ~19 days per company",
           },
           // Only what can actually be bought today. Advertising a price for an
           // unimplemented route invites an agent to pay for nothing.

@@ -12,7 +12,7 @@ import argparse
 import json
 import os
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, NamedTuple
 
 import httpx
 
@@ -20,8 +20,15 @@ from .config import load_dotenv
 from .corpus import build_corpus
 from .form4 import parse_form4, raw_doc_name
 from .models import InsiderTransaction
-from .sec_client import SecClient
-from .store import connect, tracked_tickers, write_corpus
+from .sec_client import SecClient, is_rate_limited
+from .store import (
+    connect,
+    count_stale,
+    stale_insider_tickers,
+    stale_tickers,
+    tracked_tickers,
+    write_corpus,
+)
 from .tickers import load_ticker_map
 from .universe import load_universe, normalize_ticker
 
@@ -31,6 +38,24 @@ ARCHIVE_DOC_URL = "https://www.sec.gov/Archives/edgar/data/{cik}/{acc}/{doc}"
 
 # Cap Form 4 fetches per ticker so backfill stays within the SEC rate budget.
 INSIDER_FILING_LIMIT = 50
+
+# Default batch for a scheduled refresh. The workflow passes explicit sizes per pass;
+# this is the fallback for a manual run.
+#
+# Rates measured across eight real CI runs, not derived from the rate limit: ~62
+# tickers/min with `--insider-limit 0` (2 requests each) and ~10/min with insiders
+# (up to 52 each). The limiter is not the binding constraint on the metadata pass —
+# multi-megabyte companyfacts payloads and the per-ticker delete-and-reinsert are.
+REFRESH_BATCH = 400
+# Skip anything synced more recently than this, so a manual re-run does not redo the
+# work the scheduled run just did. Below one day, so a daily job never skips itself.
+REFRESH_MAX_AGE_HOURS = 20
+
+# Stop a pass once SEC is clearly throttling us. Continuing is actively harmful: each
+# further ticker fires more requests at an address that is already blocked, which
+# extends the block. Aborting costs nothing, because a ticker that did not sync keeps
+# its old timestamp and is first in line on the next rotation.
+RATE_LIMIT_ABORT_STREAK = 3
 
 
 def fetch_insiders(
@@ -59,6 +84,14 @@ def fetch_insiders(
         try:
             form4 = parse_form4(client.get_bytes(url))
         except (httpx.HTTPError, ValueError, SyntaxError) as exc:
+            # A malformed or missing document is worth skipping. A rate-limit response
+            # is not: it says nothing about this filing, and swallowing it returns a
+            # short list that write_corpus treats as authoritative — replacing every
+            # stored row for the issuer with whatever survived the block. It would also
+            # spend the full rate-limit backoff on each of up to 50 doomed fetches.
+            # Propagate instead, so the ticker fails whole and keeps its existing rows.
+            if is_rate_limited(exc):
+                raise
             print(f"  skip Form 4 {acc}: {exc}")
             continue
 
@@ -87,14 +120,22 @@ def fetch_insiders(
     return rows
 
 
+class SyncResult(NamedTuple):
+    """Outcome of one pass. `throttled` separates "SEC said slow down" from real errors."""
+
+    ok: int
+    failed: int
+    throttled: bool
+
+
 def sync_tickers(
     tickers: list[str],
     out_dir: str | None = None,
     to_db: bool = False,
     insider_limit: int = INSIDER_FILING_LIMIT,
     cik_map: dict[str, str] | None = None,
-) -> int:
-    """Sync each ticker. Returns the number that failed.
+) -> SyncResult:
+    """Sync each ticker.
 
     `cik_map` supplies authoritative CIKs (from the universe list); when a ticker is
     present there we skip SEC's ambiguous ticker->CIK lookup entirely.
@@ -109,6 +150,8 @@ def sync_tickers(
     ok = 0
     failures: list[str] = []
     skipped: list[str] = []
+    rate_limit_streak = 0
+    throttled = False
     try:
         with SecClient() as client:
             # Only needed for tickers without an authoritative CIK.
@@ -160,6 +203,7 @@ def sync_tickers(
                         dest.append(path)
 
                     ok += 1
+                    rate_limit_streak = 0
                     insider_note = (
                         "insiders unchanged"
                         if corpus["insiders"] is None
@@ -173,6 +217,19 @@ def sync_tickers(
                 except Exception as exc:  # noqa: BLE001 - keep going, report at the end
                     failures.append(f"{ticker} ({type(exc).__name__})")
                     print(f"FAILED {ticker}: {type(exc).__name__}: {exc}")
+                    if not is_rate_limited(exc):
+                        rate_limit_streak = 0
+                        continue
+                    rate_limit_streak += 1
+                    if rate_limit_streak >= RATE_LIMIT_ABORT_STREAK:
+                        throttled = True
+                        print(
+                            f"\nABORTING: {rate_limit_streak} consecutive rate-limit "
+                            f"responses from SEC. Stopping so the block is not extended; "
+                            f"the remaining tickers keep their timestamps and lead the "
+                            f"next rotation."
+                        )
+                        break
     finally:
         if conn is not None:
             conn.close()
@@ -187,7 +244,7 @@ def sync_tickers(
         print(f"  skipped: {', '.join(skipped)}")
     if failures:
         print(f"  FAILED: {', '.join(failures)}")
-    return len(failures)
+    return SyncResult(ok=ok, failed=len(failures), throttled=throttled)
 
 
 def main() -> None:
@@ -223,6 +280,24 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--batch",
+        type=int,
+        default=REFRESH_BATCH,
+        help=(
+            "with --refresh-tracked, max tickers per run (0 = no limit). Keeps a "
+            f"scheduled run inside its time budget. Default {REFRESH_BATCH}."
+        ),
+    )
+    parser.add_argument(
+        "--max-age-hours",
+        type=int,
+        default=REFRESH_MAX_AGE_HOURS,
+        help=(
+            "with --refresh-tracked, skip tickers synced more recently than this. "
+            f"Default {REFRESH_MAX_AGE_HOURS}."
+        ),
+    )
+    parser.add_argument(
         "--out", default=None, help="JSON output dir (default data/corpus unless --db)"
     )
     parser.add_argument("--db", action="store_true", help="write to Postgres via DATABASE_URL")
@@ -234,17 +309,28 @@ def main() -> None:
     cik_map: dict[str, str] = {}
 
     if args.refresh_tracked:
+        # Which clock this run rotates on follows from what it will actually fetch. A
+        # metadata-only pass must not consume the insider rotation's turn, or the cheap
+        # daily job would mark everything fresh and Form 4 data would never refresh.
+        insiders_on = args.insider_limit != 0
+        column = "insiders_updated_at" if insiders_on else "updated_at"
+        select = stale_insider_tickers if insiders_on else stale_tickers
         conn = connect()
         try:
-            tracked = tracked_tickers(conn)
+            # `--batch 0` means no limit; SQL treats LIMIT NULL as unbounded.
+            tracked = select(conn, args.max_age_hours, args.batch or None)
+            eligible = count_stale(conn, column, args.max_age_hours)
         finally:
             conn.close()
         if not tracked:
-            print("no tracked tickers in the database — nothing to refresh")
+            print(f"nothing stale on {column} beyond {args.max_age_hours}h — corpus is current")
             return
         cik_map = {t: c for t, c in tracked}
         tickers = [t for t, _ in tracked]
-        print(f"refreshing {len(tickers)} tracked ticker(s)")
+        print(
+            f"refreshing {len(tickers)} of {eligible} ticker(s) stale on {column}"
+            f" (insider limit {args.insider_limit})"
+        )
     elif args.universe:
         if args.universe == "all":
             # SEC's own map is the only source that covers the full filer universe.
@@ -279,14 +365,24 @@ def main() -> None:
         out_dir = "data/corpus"  # default when not writing to the database
     to_db = args.db or args.refresh_tracked or bool(args.universe)
 
-    failed = sync_tickers(
+    result = sync_tickers(
         tickers,
         out_dir=out_dir,
         to_db=to_db,
         insider_limit=args.insider_limit,
         cik_map=cik_map,
     )
-    if failed:
+
+    # Being throttled after real work is not a broken run, it is a deferred slice: those
+    # tickers kept their timestamps and lead the next rotation. Failing here would page
+    # on a condition that resolves itself, and the alert that actually matters already
+    # exists — the workflow's freshness gate fails when the oldest row ages out, which
+    # is what a genuinely stalled rotation looks like. A pass that synced *nothing* is
+    # different: there is no progress to defer, so surface it.
+    if result.throttled and result.ok:
+        print("throttled by SEC after partial progress — next run resumes from here")
+        return
+    if result.failed:
         # Non-zero exit so a scheduled run surfaces as a failure instead of passing quietly.
         raise SystemExit(1)
 

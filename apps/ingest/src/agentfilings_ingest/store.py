@@ -35,6 +35,77 @@ def tracked_tickers(conn: psycopg.Connection) -> list[tuple[str, str]]:
         return [(row[0], row[1]) for row in cur.fetchall()]
 
 
+def stale_tickers(
+    conn: psycopg.Connection, max_age_hours: int, limit: int | None
+) -> list[tuple[str, str]]:
+    """The `limit` least-recently-synced tickers older than `max_age_hours`.
+
+    A scheduled run has a fixed time budget, so it must take a *bounded slice* rather
+    than the whole corpus. Ordering oldest-first makes consecutive runs pick up where
+    the last left off, so the corpus round-robins to completion.
+
+    This replaces an unbounded `tracked_tickers` refresh, which could not finish: at
+    ~39 SEC requests per ticker and 10 req/s, 2,800 tickers need ~3 hours. Every run
+    was killed partway through the alphabet, so the same prefix was re-synced twice a
+    day and the rest of the corpus was never reached at all.
+
+    A ticker that fails keeps its old timestamp and is retried next run. That is right
+    for transient failures, but a permanently broken ticker will occupy a slot every
+    run — `sync_tickers` reports failures so they do not stay invisible.
+    """
+    return _select_stale(conn, "updated_at", max_age_hours, limit)
+
+
+def stale_insider_tickers(
+    conn: psycopg.Connection, max_age_hours: int, limit: int | None
+) -> list[tuple[str, str]]:
+    """Same, but ordered by when Form 4 data was last fetched.
+
+    Insider data needs its own clock because it is ~20x more expensive to refresh than
+    company metadata (up to 50 Form 4 documents per ticker, versus two API calls), so
+    the two run on different cadences. Sharing `updated_at` would let the cheap daily
+    pass mark every row fresh and starve the insider rotation permanently.
+
+    Rows never fetched sort first, so a corpus backfilled without insiders fills in.
+    """
+    return _select_stale(conn, "insiders_updated_at", max_age_hours, limit)
+
+
+def _select_stale(
+    conn: psycopg.Connection, column: str, max_age_hours: int, limit: int | None
+) -> list[tuple[str, str]]:
+    # `column` is never caller-supplied — it is one of two literals chosen above — so
+    # interpolating it cannot carry untrusted input. Values stay parameterized.
+    assert column in ("updated_at", "insiders_updated_at"), column
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            select ticker, cik from companies
+            where ticker is not null
+              and ({column} is null or {column} < now() - (%s * interval '1 hour'))
+            order by {column} asc nulls first, ticker
+            limit %s
+            """,
+            (max_age_hours, limit),
+        )
+        return [(row[0], row[1]) for row in cur.fetchall()]
+
+
+def count_stale(conn: psycopg.Connection, column: str, max_age_hours: int) -> int:
+    """How many tickers are eligible — used to report progress through a rotation."""
+    assert column in ("updated_at", "insiders_updated_at"), column
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""
+            select count(*) from companies
+            where ticker is not null
+              and ({column} is null or {column} < now() - (%s * interval '1 hour'))
+            """,
+            (max_age_hours,),
+        )
+        return int(cur.fetchone()[0])
+
+
 def _rows(items: list[dict[str, Any]], cik: str, keys: tuple[str, ...]) -> list[tuple[Any, ...]]:
     return [tuple((cik if k == "cik" else item.get(k)) for k in keys) for item in items]
 
@@ -54,20 +125,29 @@ def write_corpus(conn: psycopg.Connection, corpus: dict[str, Any]) -> None:
                 (company["ticker"], cik),
             )
 
+        # Advance the insider clock only on runs that actually fetched Form 4 data, so
+        # the cheap metadata pass cannot mark insider data fresh that it never touched.
+        fetched_insiders = corpus.get("insiders") is not None
         cur.execute(
             """
-            insert into companies (cik, ticker, name, sic, sic_description, exchanges, updated_at)
+            insert into companies (cik, ticker, name, sic, sic_description, exchanges,
+                                   updated_at, insiders_updated_at)
             values (%(cik)s, %(ticker)s, %(name)s, %(sic)s, %(sic_description)s,
-                    %(exchanges)s, now())
+                    %(exchanges)s, now(),
+                    case when %(fetched_insiders)s then now() end)
             on conflict (cik) do update set
               ticker = excluded.ticker,
               name = excluded.name,
               sic = excluded.sic,
               sic_description = excluded.sic_description,
               exchanges = excluded.exchanges,
-              updated_at = now()
+              updated_at = now(),
+              insiders_updated_at = case
+                when %(fetched_insiders)s then now()
+                else companies.insiders_updated_at
+              end
             """,
-            company,
+            {**company, "fetched_insiders": fetched_insiders},
         )
 
         filing_keys = (

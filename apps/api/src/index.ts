@@ -6,6 +6,7 @@ import { stripeEnabled } from "./billing/stripe";
 import { loadEnv } from "./env";
 import { TtlCache } from "./lib/cache";
 import { fail } from "./lib/response";
+import { withJsonAccept } from "./mcp/accept";
 import { createMcpPaidWrapper } from "./mcp/payments";
 import { createMcpServer } from "./mcp/server";
 import { createPaymentStack, x402Enabled } from "./payments/x402";
@@ -20,6 +21,8 @@ import { llmsTxt } from "./routes/llms";
 import { openapi } from "./routes/openapi";
 import { probe } from "./routes/probe";
 import { root } from "./routes/root";
+import { aiCatalog, serverCard } from "./routes/server-card";
+import { x402Manifest } from "./routes/well-known";
 
 export interface AppDeps {
   repo?: CorpusRepo;
@@ -56,6 +59,15 @@ export function createApp(deps: AppDeps = {}): Hono {
   app.route("/llms.txt", llmsTxt(publicBase));
   app.route("/health", health);
   app.route("/probe", probe(repo));
+  // The draft specifies the extensionless path; the `.json` alias serves crawlers that
+  // guess it, which is about a third of the requests seen for this manifest.
+  const manifest = x402Manifest(publicBase, x402Enabled(env));
+  app.route("/.well-known/x402", manifest);
+  app.route("/.well-known/x402.json", manifest);
+  // MCP Server Card at the one location the spec reserves, and the AI Catalog that
+  // points clients to it. See routes/server-card.ts for what is left out and why.
+  app.route("/mcp/server-card", serverCard(publicBase));
+  app.route("/.well-known/ai-catalog.json", aiCatalog(publicBase));
 
   // Billing is free and unauthenticated by necessity: a prospective buyer has no key
   // yet, and Stripe's webhook cannot present one.
@@ -80,6 +92,22 @@ export function createApp(deps: AppDeps = {}): Hono {
     ? createMcpPaidWrapper(env, paymentStack.resourceServer)
     : undefined;
   app.all("/mcp", async (c) => {
+    // This server is stateless and JSON-only, so it has no server-initiated stream to
+    // offer. The spec's answer for that case is 405, not an SSE stream: the transport
+    // would otherwise open one that never carries an event and hangs until the client
+    // gives up, and a GET without `text/event-stream` in Accept got a 406 that
+    // liveness probes read as "down".
+    if (c.req.method === "GET") {
+      return c.json(
+        {
+          jsonrpc: "2.0",
+          error: { code: -32000, message: "Method not allowed: this server is stateless. Use POST." },
+          id: null,
+        },
+        405,
+        { Allow: "POST" },
+      );
+    }
     // A subscriber gets unwrapped tools: they have already paid this month, and
     // charging them per tool call as well would be billing twice for one thing.
     // The gate ahead of this has already authenticated (or rejected) the key.
@@ -89,7 +117,7 @@ export function createApp(deps: AppDeps = {}): Hono {
       enableJsonResponse: true,
     });
     await server.connect(transport);
-    return transport.handleRequest(c.req.raw);
+    return transport.handleRequest(withJsonAccept(c.req.raw));
   });
 
   return app;

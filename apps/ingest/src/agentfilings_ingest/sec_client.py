@@ -26,6 +26,26 @@ _USER_AGENT_TEMPLATE = "AgentFilings/1.0 (contact: {email})"
 MAX_RETRIES = 3
 RETRY_BACKOFF_SEC = 1.0
 
+# A 429 is different in kind from a 5xx. A 5xx is usually a momentary blip that clears
+# in a second; SEC's fair-access enforcement holds the source address off for far
+# longer, so the 1s/2s schedule burned all three attempts inside the block and every
+# remaining ticker failed the same way. Observed on 2026-09-01: 101 consecutive
+# failures in one pass, each having retried and given up within ~3 seconds.
+RATE_LIMIT_BACKOFF_SEC = 15.0
+
+
+def is_rate_limited(exc: BaseException) -> bool:
+    """Whether a failure is SEC throttling us, as opposed to a real error.
+
+    Callers use this to back off the whole run rather than treating it as data loss:
+    a throttled ticker keeps its old timestamp and is picked up by the next rotation.
+    """
+    return (
+        isinstance(exc, httpx.HTTPStatusError)
+        and exc.response is not None
+        and exc.response.status_code == 429
+    )
+
 
 class RateLimiter:
     """Thread-safe minimum-interval limiter shared across callers."""
@@ -103,7 +123,8 @@ class SecClient:
                 last_exc = exc
 
             if attempt < MAX_RETRIES - 1:
-                time.sleep(RETRY_BACKOFF_SEC * (2**attempt))
+                base = RATE_LIMIT_BACKOFF_SEC if is_rate_limited(last_exc) else RETRY_BACKOFF_SEC
+                time.sleep(base * (2**attempt))
 
         assert last_exc is not None
         raise last_exc

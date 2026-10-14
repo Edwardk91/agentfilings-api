@@ -1,5 +1,6 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import postgres, { type Sql } from "postgres";
+import { type Sql } from "postgres";
+import { createSql, withRetry } from "../lib/db";
 
 // API key issuance and lookup for the subscription rail.
 //
@@ -145,12 +146,12 @@ export class PostgresApiKeyStore implements ApiKeyStore {
   private readonly sql: Sql;
 
   constructor(connectionString: string) {
-    // Supabase's transaction pooler (6543) has no prepared-statement support.
-    this.sql = postgres(connectionString, { prepare: false });
+    // Pooler quirks handled centrally — see lib/db.ts.
+    this.sql = createSql(connectionString);
   }
 
   async findActiveByHash(keyHash: string): Promise<ApiKeyRecord | null> {
-    const rows = await this.sql<
+    const rows = await withRetry(() => this.sql<
       {
         id: number;
         key_prefix: string;
@@ -165,7 +166,7 @@ export class PostgresApiKeyStore implements ApiKeyStore {
              status, created_at::text
       from api_keys
       where key_hash = ${keyHash} and status = 'active' and revoked_at is null
-      limit 1`;
+      limit 1`);
     const row = rows[0];
     if (!row) return null;
     return {
